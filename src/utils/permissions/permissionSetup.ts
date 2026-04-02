@@ -919,6 +919,7 @@ export async function initializeToolPermissionContext({
 
   // free-code: bypass permissions is always available
   const isBypassPermissionsModeAvailable = true
+  const settings = getSettings_DEPRECATED() || {}
 
   // Load all permission rules from disk
   const rulesFromDisk = loadAllPermissionRulesFromDisk()
