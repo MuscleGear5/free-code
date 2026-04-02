@@ -1,0 +1,101 @@
+#!/bin/bash
+# free-code — Launch free-code with dedicated config at ~/.cc/free-code/
+# Uses the same profile infrastructure as cc-mini/mid/full but launches
+# the free-code binary instead of the standard claude binary.
+set -e
+
+CC_HOME="${HOME}/.cc"
+PROFILE="$CC_HOME/free-code"
+SCRIPT="$0"
+# Resolve symlinks to find the real repo directory
+while [ -L "$SCRIPT" ]; do
+    DIR="$(cd "$(dirname "$SCRIPT")" && pwd)"
+    SCRIPT="$(readlink "$SCRIPT")"
+    [[ "$SCRIPT" != /* ]] && SCRIPT="$DIR/$SCRIPT"
+done
+REPO_DIR="$(cd "$(dirname "$SCRIPT")/.." && pwd)"
+BINARY="$REPO_DIR/cli-dev"
+
+_R='\033[0m'; _B='\033[1m'; _DIM='\033[2m'
+_GREEN='\033[32m'; _RED='\033[31m'; _YELLOW='\033[33m'; _CYAN='\033[36m'
+
+_ok()   { printf "  ${_GREEN}OK${_R}  %s\n" "$1"; }
+_fail() { printf "  ${_RED}FAIL${_R}  %s\n" "$1"; exit 1; }
+_warn() { printf "  ${_YELLOW}!!${_R}  %s\n" "$1"; }
+
+# ── banner ──
+printf "\n${_B}${_CYAN}  ╭────────────────────────────────╮${_R}\n"
+printf "${_B}${_CYAN}  │ free-code                       │${_R}\n"
+printf "${_B}${_CYAN}  ╰────────────────────────────────╯${_R}\n\n"
+
+# ── validate ──
+[ -d "$PROFILE" ]              || _fail "profile not found: $PROFILE"
+[ -f "$PROFILE/settings.json" ] || _fail "settings.json missing in $PROFILE"
+[ -x "$BINARY" ]               || _fail "binary not found: $BINARY"
+
+# ── ensure shared credentials are linked ──
+SHARED_CREDS="$CC_HOME/credentials.json"
+if [ -f "$SHARED_CREDS" ]; then
+    resolved_creds=$(readlink -f "$PROFILE/.credentials.json" 2>/dev/null || echo "")
+    resolved_shared=$(readlink -f "$SHARED_CREDS" 2>/dev/null)
+    if [ "$resolved_creds" != "$resolved_shared" ]; then
+        ln -sf "$SHARED_CREDS" "$PROFILE/.credentials.json"
+    fi
+
+    # ── token health check ──
+    token_status=$(python3 -c "
+import json, time
+try:
+    with open('$SHARED_CREDS') as f:
+        d = json.load(f)
+    oauth = d.get('claudeAiOauth', {})
+    exp_s = oauth.get('expiresAt', 0) / 1000
+    now = time.time()
+    h = (exp_s - now) / 3600
+    sub = oauth.get('subscriptionType', '?')
+    if h <= 0:     print(f'expired|{sub}|{h:.1f}')
+    elif h < 1:    print(f'expiring|{sub}|{h:.1f}')
+    else:          print(f'ok|{sub}|{h:.1f}')
+except: print('error||0')
+" 2>&1)
+
+    IFS='|' read -r state sub hours <<< "$token_status"
+    case "$state" in
+        ok)       _ok "token: $sub (${hours}h remaining)" ;;
+        expiring) _warn "token expiring in ${hours}h — run cc-login soon" ;;
+        expired)  _warn "token EXPIRED — run cc-login" ;;
+        *)        _warn "could not check token" ;;
+    esac
+else
+    _warn "no shared credentials — run cc-login first"
+fi
+
+# ── ensure runtime dirs ──
+mkdir -p "$PROFILE/projects" "$PROFILE/sessions" 2>/dev/null || true
+
+# ── set up sub-agent routing ──
+export CLAUDE_CONFIG_DIR="$PROFILE"
+export CC_SUBAGENT_PROFILE="${CC_SUBAGENT_PROFILE:-zai}"
+
+TEAMMATE_BIN="$CC_HOME/bin/teammate"
+if [ -f "$TEAMMATE_BIN" ] && [ -x "$TEAMMATE_BIN" ]; then
+    export CLAUDE_CODE_TEAMMATE_COMMAND="$TEAMMATE_BIN"
+    _ok "teammate cmd: $TEAMMATE_BIN"
+else
+    unset CLAUDE_CODE_TEAMMATE_COMMAND 2>/dev/null || true
+fi
+
+export PATH="$CC_HOME/bin:$PATH"
+
+_ok "config: CLAUDE_CONFIG_DIR=$PROFILE"
+_ok "binary: $BINARY"
+
+# ── ensure patches are applied ──
+command -v cc-patch >/dev/null && cc-patch >/dev/null 2>&1 || true
+
+# ── sync base commands into profile ──
+"$CC_HOME/bin/cc-sync-commands" >/dev/null 2>&1 || true
+
+# ── launch ──
+printf "\n${_B}${_GREEN}  >> free-code${_R}\n\n"
+exec "$BINARY" "$@"
